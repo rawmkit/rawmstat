@@ -31,9 +31,17 @@ uninstall:
 	rm -f ${DESTDIR}${MANPREFIX}/man1/rawmstat.1
 
 clean:
-	rm -f rawmstat rawmstat.o rawmstat-config.o rawmstat.1
+	rm -f rawmstat rawmstat.o rawmstat-config.o rawmstat.1 \
+	      tests/signal-number tests/signal-number.o
+
+tests/signal-number: tests/signal-number.o
+	${CC} -o $@ tests/signal-number.o
+
+check: rawmstat tests/signal-number
+	./tests/config.sh ./rawmstat
+	./tests/protocol.sh ./rawmstat ./tests/signal-number
 
 release:
 	git tag -a v${VERSION} -m v${VERSION}
 
-.PHONY: all install uninstall clean release
+.PHONY: all check install uninstall clean release

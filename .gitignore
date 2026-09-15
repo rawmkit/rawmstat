@@ -2,6 +2,8 @@
 rawmstat
 rawmstat.o
 rawmstat.1
+tests/signal-number
+tests/signal-number.o
 
 # vim undo and swap files
 .*.un~
