@@ -18,7 +18,7 @@ rawmstat - configurable status producer for rawm
 and publishes the result for *rawm*(1).
 
 With the *rawm-v1* protocol, the composed status is written as plain UTF-8 to
-the *_RAWM_STATUS_V1* property of the X root window.  The property type is
+the *\_RAWM\_STATUS\_V1* property of the X root window.  The property type is
 *UTF8_STRING*.  No process discovery, socket, root *WM_NAME* convention, or
 in-band presentation markup is involved.
 

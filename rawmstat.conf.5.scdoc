@@ -57,7 +57,7 @@ status = {
 ## rawm-v1
 
 The final status is a plain UTF-8 string of at most 255 bytes.  In normal X
-mode rawmstat writes it to the *_RAWM_STATUS_V1* property of the X root window
+mode rawmstat writes it to the *\_RAWM\_STATUS\_V1* property of the X root window
 with type *UTF8_STRING* and format 8.
 
 The protocol contains text only.  It defines no colors, markup, block IDs,
