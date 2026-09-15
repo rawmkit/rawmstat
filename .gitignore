@@ -1,8 +1,8 @@
 # build files and artefacts
 config.h
-rawstat
-rawstat.o
-rawstat.1
+rawmstat
+rawmstat.o
+rawmstat.1
 
 # vim undo and swap files
 .*.un~

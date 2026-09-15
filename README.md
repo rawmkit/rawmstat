@@ -1,7 +1,7 @@
 OVERVIEW
 ========
 
-This repository contains `rawstat`, a tiny utility that generates a
+This repository contains `rawmstat`, a tiny utility that generates a
 status bar for `rawm(1)`, `dwm(1)` or similar programs.  There is an
 ability to generate status bar to stdout, that may be useful for
 `dvtm(1)`, `screen(1)` and similar programs.
@@ -42,12 +42,12 @@ See `config.mk` file for configuration parameters.
 CUSTOMIZATION
 =============
 
-`rawstat` can be customized by creating a custom `config.h` file and
+`rawmstat` can be customized by creating a custom `config.h` file and
 (re)compiling the source code.
 
 
 LICENSE
 =======
 
-`rawstat` is licensed through ISC License.
+`rawmstat` is licensed through ISC License.
 See LICENSE file for copyright and license details.

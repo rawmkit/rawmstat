@@ -1,5 +1,5 @@
 # project metadata
-NAME      = rawstat
+NAME      = rawmstat
 VERSION   = 0.1
 
 # paths

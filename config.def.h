@@ -1,4 +1,4 @@
-/* rawstat customization.
+/* rawmstat customization.
  * See LICENSE file for copyright and license details. */
 
 /*

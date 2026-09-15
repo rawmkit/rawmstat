@@ -1,16 +1,16 @@
-RAWSTAT(1)
+RAWMSTAT(1)
 
 # NAME
 
-rawstat - modular status bar for rawm or similar programs
+rawmstat - modular status bar for rawm or similar programs
 
 # SYNOPSIS
 
-*rawstat* [*-d* _delim_] [*-p*]
+*rawmstat* [*-d* _delim_] [*-p*]
 
 # DESCRIPTION
 
-*rawstat* is a tiny utility for generating a status bar for *rawm*(1)
+*rawmstat* is a tiny utility for generating a status bar for *rawm*(1)
 or similar programs.  There is an ability to generate status bar to
 stdout, that may be useful for *dvtm*(1) and similar programs.
 
@@ -27,7 +27,7 @@ The options are as follows:
 
 # CUSTOMIZATION
 
-*rawstat* can be customized by creating a custom _config.h_ file and
+*rawmstat* can be customized by creating a custom _config.h_ file and
 (re)compiling the source code.  This keeps it fast, secure and simple.
 
 # EXIT STATUS
