@@ -26,11 +26,11 @@ install: all
 	cp -f rawmstat.conf.5 ${DESTDIR}${MANPREFIX}/man5/
 	if [ ! -e ${DESTDIR}${SYSCONFDIR}/rawm/rawmstat.conf ]; then \
 		cp rawmstat.conf ${DESTDIR}${SYSCONFDIR}/rawm/rawmstat.conf; \
+		chmod 0644 ${DESTDIR}${SYSCONFDIR}/rawm/rawmstat.conf; \
 	fi
 	chmod 0755 ${DESTDIR}${PREFIX}/bin/rawmstat
 	chmod 0644 ${DESTDIR}${MANPREFIX}/man1/rawmstat.1
 	chmod 0644 ${DESTDIR}${MANPREFIX}/man5/rawmstat.conf.5
-	chmod 0644 ${DESTDIR}${SYSCONFDIR}/rawm/rawmstat.conf
 
 uninstall:
 	rm -f ${DESTDIR}${PREFIX}/bin/rawmstat

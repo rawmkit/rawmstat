@@ -141,7 +141,7 @@ blocks = (
   {
     name = "load";
     prefix = "load ";
-    command = ("cut", "-d ", "-f1-3", "/proc/loadavg");
+    command = ("cut", "-d", " ", "-f", "1-3", "/proc/loadavg");
     interval = 5;
   },
   {
