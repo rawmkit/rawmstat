@@ -1,5 +1,4 @@
 # build files and artefacts
-config.h
 rawmstat
 rawmstat.o
 rawmstat.1
