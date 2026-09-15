@@ -1,0 +1,187 @@
+RAWMSTAT.CONF(5)
+
+# NAME
+
+rawmstat.conf - rawmstat runtime configuration
+
+# DESCRIPTION
+
+*rawmstat*(1) uses libconfig syntax.  Configuration describes the status
+protocol, textual composition policy, and the blocks that produce status text.
+
+The built-in configuration contains one clock block and is usable without a
+configuration file.  In normal mode configuration is layered in this order:
+
+. built-in defaults
+. _${SYSCONFDIR}/rawm/rawmstat.conf_ (normally _/etc/rawm/rawmstat.conf_)
+. _$XDG_CONFIG_HOME/rawm/rawmstat.conf_, when *XDG_CONFIG_HOME* is absolute;
+  otherwise _$HOME/.config/rawm/rawmstat.conf_
+
+Later scalar settings override earlier values.  When a *blocks* list is
+present it replaces the complete block list from previous layers.
+
+With *rawmstat -c path*, the system and user files are skipped: built-in
+defaults are followed by exactly _path_.  A missing explicitly selected file
+is an error.  Missing normal system or user files are not errors.
+
+Unknown settings, wrong types, duplicate block names, unsupported protocols,
+invalid signal offsets, and invalid UTF-8 configuration strings are fatal
+configuration errors.  Use *rawmstat -C* to validate the effective
+configuration without opening X or executing commands.
+
+Libconfig *@include* directives are supported.  Relative include paths are
+resolved relative to the directory of the configuration file being loaded.
+
+# STATUS
+
+The top-level *status* group controls composition and transport.
+
+*protocol* = "rawm-v1"
+	Output protocol.  *"rawm-v1"* is currently the only supported value and
+	the built-in default.
+
+*delimiter* = string
+	Text inserted between non-empty block results.  The built-in default is
+	*" | "*.  The delimiter must be valid UTF-8.  It is not appended before
+	the first or after the last emitted block.
+
+Example:
+
+```
+status = {
+  protocol = "rawm-v1";
+  delimiter = " | ";
+};
+```
+
+## rawm-v1
+
+The final status is a plain UTF-8 string of at most 255 bytes.  In normal X
+mode rawmstat writes it to the *_RAWM_STATUS_V1* property of the X root window
+with type *UTF8_STRING* and format 8.
+
+The protocol contains text only.  It defines no colors, markup, block IDs,
+click routing, producer discovery, or process supervision.  Presentation is
+owned by *rawm*(1).  The root *WM_NAME* property is not used.
+
+# BLOCKS
+
+The top-level *blocks* setting is a list of groups.  Blocks are evaluated in
+list order and non-empty results are joined with *status.delimiter*.
+
+```
+blocks = (
+  {
+    name = "clock";
+    prefix = "";
+    command = ("date", "+%a %b %d %H:%M");
+    interval = 5;
+    signal = 0;
+  }
+);
+```
+
+Each block accepts these settings:
+
+*name* = string
+	Required unique block name.  The name identifies the block in diagnostics;
+	it is not transmitted by *rawm-v1*.  Empty and duplicate names are errors.
+
+*prefix* = string
+	Optional UTF-8 text prepended to the block's captured first line.  Default
+	is the empty string.  Prefix plus captured text must fit within the protocol
+	limit.
+
+*command* = (string, ...)
+	Required non-empty argument vector.  Element zero names the executable;
+	the remaining elements are passed as its arguments.  rawmstat calls
+	*execvp*(3) directly.  Shell parsing, expansion, redirection, pipelines,
+	and globbing do not occur unless a shell is explicitly named in the vector.
+
+*interval* = integer
+	Periodic update interval in seconds.  Must be >= 0.  Zero disables periodic
+	updates; the block is still executed once at startup and may be refreshed by
+	its configured signal.  Scheduling uses a monotonic clock.
+
+*signal* = integer
+	Realtime-signal offset.  Must be >= 0 and available on the host.  Zero
+	disables signal-triggered updates.  A value _N_ maps to *SIGRTMIN+N*.
+	Multiple blocks may intentionally use the same non-zero offset and will all
+	be refreshed by that signal.
+
+# COMMAND OUTPUT
+
+rawmstat captures standard output from each block.  Only the first line is
+used; subsequent output is discarded.  A trailing carriage return is removed
+from the captured line.
+
+The captured line must be valid UTF-8, contain no embedded NUL byte, and fit
+within 255 bytes before composition.  The configured prefix is prepended after
+capture.  Blocks with an empty resulting string are omitted from delimiter
+composition.
+
+Standard error from a block is not captured and remains attached to
+rawmstat's standard error.  Command execution errors are reported by rawmstat.
+
+The complete composed status, including prefixes and delimiters, must not
+exceed 255 bytes.  If it does, rawmstat reports an error rather than publishing
+a truncated protocol message.
+
+# EXAMPLES
+
+A clock and load-average status:
+
+```
+status = {
+  protocol = "rawm-v1";
+  delimiter = "  ";
+};
+
+blocks = (
+  {
+    name = "load";
+    prefix = "load ";
+    command = ("cut", "-d ", "-f1-3", "/proc/loadavg");
+    interval = 5;
+  },
+  {
+    name = "clock";
+    command = ("date", "+%H:%M");
+    interval = 30;
+  }
+);
+```
+
+A command that deliberately requires shell syntax:
+
+```
+blocks = (
+  {
+    name = "home";
+    command = ("/bin/sh", "-c", "printf '%s' \"$HOME\"");
+    interval = 0;
+    signal = 1;
+  }
+);
+```
+
+Refresh that block with the platform's numeric value for *SIGRTMIN+1*, for
+example from C via *kill*(2) or from a shell that supports realtime signal
+names/numbers.
+
+# FILES
+
+_/etc/rawm/rawmstat.conf_
+	System configuration with the default build-time *SYSCONFDIR*.
+
+_$XDG_CONFIG_HOME/rawm/rawmstat.conf_
+	Preferred user configuration when *XDG_CONFIG_HOME* is absolute.
+
+_$HOME/.config/rawm/rawmstat.conf_
+	Fallback user configuration.
+
+# SEE ALSO
+
+*rawmstat*(1), *rawm*(1), *rawm.conf*(5), *libconfig*(5)
+
+; vim: ft=scdoc cc=80 tw=78

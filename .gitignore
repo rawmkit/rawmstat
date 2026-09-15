@@ -2,6 +2,7 @@
 rawmstat
 rawmstat.o
 rawmstat.1
+rawmstat.conf.5
 tests/signal-number
 tests/signal-number.o
 

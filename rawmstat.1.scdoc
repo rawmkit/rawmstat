@@ -2,43 +2,103 @@ RAWMSTAT(1)
 
 # NAME
 
-rawmstat - modular status bar for rawm or similar programs
+rawmstat - configurable status producer for rawm
 
 # SYNOPSIS
 
-*rawmstat* [*-d* _delim_] [*-p*]
+*rawmstat* [*-p*] [*-c* _path_]
+
+*rawmstat* *-C* [*-c* _path_]
+
+*rawmstat* *-v*
 
 # DESCRIPTION
 
-*rawmstat* is a tiny utility for generating a status bar for *rawm*(1)
-or similar programs.  There is an ability to generate status bar to
-stdout, that may be useful for *dvtm*(1) and similar programs.
+*rawmstat* executes configured status blocks, composes their textual output,
+and publishes the result for *rawm*(1).
 
-The status bar is made from text output from command‐line programs.
-Commands are added and removed by editing _config.h_ file.
+With the *rawm-v1* protocol, the composed status is written as plain UTF-8 to
+the *_RAWM_STATUS_V1* property of the X root window.  The property type is
+*UTF8_STRING*.  No process discovery, socket, root *WM_NAME* convention, or
+in-band presentation markup is involved.
 
-The options are as follows:
+Configuration is read at run time.  See *rawmstat.conf*(5) for configuration
+precedence, block semantics, update intervals, and realtime update signals.
 
-*-d* _delim_
-	Set outputs delimiter.
+Unless *-p* is used, rawmstat requires an X display.  It does not start or
+supervise *rawm*(1); normally both processes are started by the X session.
 
-*-p*
-	Print status bar to stdout.
+# OPTIONS
 
-# CUSTOMIZATION
+*-c* _path_, *--config* _path_
+	Load built-in defaults followed by exactly _path_.  The normal system and
+	user configuration files are not read.
 
-*rawmstat* can be customized by creating a custom _config.h_ file and
-(re)compiling the source code.  This keeps it fast, secure and simple.
+*-C*, *--check-config*
+	Load and validate the effective configuration, then exit without opening
+	the X display or executing any blocks.
+
+*-p*, *--stdout*
+	Write each changed composed status line to standard output instead of the
+	X root property.  This is useful for testing and for text-oriented status
+	consumers.  The process continues running and updates according to the same
+	interval and signal rules as X mode.
+
+*-v*, *--version*
+	Print the version and exit.
+
+*-h*, *--help*
+	Print a short usage message and exit.
+
+# RUNTIME MODEL
+
+At startup every configured block is executed once.  A block with a non-zero
+*interval* is subsequently executed on its monotonic interval.  A block with a
+non-zero *signal* may also be refreshed by sending the corresponding realtime
+signal to the rawmstat process.  Signal handlers only wake the main event loop;
+commands and Xlib operations are not executed from signal context.
+
+Block commands are direct argument vectors executed with *execvp*(3).  Shell
+syntax is not interpreted unless a shell is explicitly configured, for
+example:
+
+```
+command = ("/bin/sh", "-c", "printf '%s' \"$HOME\"");
+```
+
+Only the first output line from a block is used.  A trailing carriage return
+is removed.  Block text, prefixes, delimiters, and the final status must be
+valid UTF-8 and the final *rawm-v1* payload must fit within 255 bytes.
+
+# SIGNALS
+
+*SIGINT*, *SIGTERM*
+	Terminate the main loop cleanly.
+
+*SIGRTMIN+N*
+	Refresh each block whose *signal* setting is _N_.  A signal value of zero
+	disables signal-triggered refresh for that block.  Availability of realtime
+	signal offsets is validated at startup.
+
+# FILES
+
+_/etc/rawm/rawmstat.conf_
+	System configuration, when present.
+
+_$XDG_CONFIG_HOME/rawm/rawmstat.conf_
+	User configuration when *XDG_CONFIG_HOME* is set to an absolute path.
+
+_$HOME/.config/rawm/rawmstat.conf_
+	User configuration fallback.
 
 # EXIT STATUS
 
-*0* on success, and *>0* if an error occurs.
+*0* on normal termination or successful configuration validation; *>0* on a
+configuration, display, setup, or runtime publication error.
 
 # SEE ALSO
 
-*rawm*(1),
-*rawmenu*(1),
-*rawterm*(1)
+*rawm*(1), *rawm.conf*(5), *rawmstat.conf*(5), *libconfig*(5)
 
 # AUTHORS
 
@@ -47,4 +107,4 @@ The original dwmblocks was written by torrinfail <torrinfail@gmail.com>.
 The current implementation was reworked by
 Alexandr Savca <alexandr.savca89@gmail.com>.
 
-; vim: ft=scdoc cc=72 tw=70
+; vim: ft=scdoc cc=80 tw=78
