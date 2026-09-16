@@ -103,6 +103,21 @@ blocks = ({ name = "bad"; command = ("true"); signal = -1; });
 EOC
 expect_fail "$tmp/negative-signal.conf"
 
+cat >"$tmp/zero-timeout.conf" <<'EOC'
+blocks = ({ name = "bad"; command = ("true"); timeout_ms = 0; });
+EOC
+expect_fail "$tmp/zero-timeout.conf"
+
+cat >"$tmp/negative-timeout.conf" <<'EOC'
+blocks = ({ name = "bad"; command = ("true"); timeout_ms = -1; });
+EOC
+expect_fail "$tmp/negative-timeout.conf"
+
+cat >"$tmp/large-timeout.conf" <<'EOC'
+blocks = ({ name = "bad"; command = ("true"); timeout_ms = 600001; });
+EOC
+expect_fail "$tmp/large-timeout.conf"
+
 cat >"$tmp/include-body.conf" <<'EOC'
 blocks = ({ name = "included"; command = ("printf", "included"); interval = 0; });
 EOC

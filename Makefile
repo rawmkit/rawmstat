@@ -47,6 +47,7 @@ tests/signal-number: tests/signal-number.o
 check: rawmstat tests/signal-number
 	./tests/config.sh ./rawmstat
 	./tests/protocol.sh ./rawmstat ./tests/signal-number
+	./tests/lifecycle.sh ./rawmstat ./tests/signal-number
 
 release:
 	git tag -a v${VERSION} -m v${VERSION}
