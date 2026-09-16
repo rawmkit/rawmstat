@@ -39,15 +39,20 @@ uninstall:
 
 clean:
 	rm -f rawmstat rawmstat.o rawmstat-config.o rawmstat.1 rawmstat.conf.5 \
-	      tests/signal-number tests/signal-number.o
+	      tests/signal-number tests/signal-number.o \
+	      tests/bar-checksum tests/bar-checksum.o
 
 tests/signal-number: tests/signal-number.o
 	${CC} -o $@ tests/signal-number.o
 
-check: rawmstat tests/signal-number
+tests/bar-checksum: tests/bar-checksum.o
+	${CC} -o $@ tests/bar-checksum.o -L${X11LIB} -lX11
+
+check: rawmstat tests/signal-number tests/bar-checksum
 	./tests/config.sh ./rawmstat
 	./tests/protocol.sh ./rawmstat ./tests/signal-number
 	./tests/lifecycle.sh ./rawmstat ./tests/signal-number
+	./tests/integration.sh ./rawmstat ./tests/signal-number ./tests/bar-checksum "$${RAWM:-}"
 
 release:
 	git tag -a v${VERSION} -m v${VERSION}
