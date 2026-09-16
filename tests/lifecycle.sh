@@ -32,11 +32,14 @@ wait_for()
   done
 }
 
-wait_line()
+wait_sample()
 {
-  text=$1
-  file=$2
-  grep -Fxq "$text" "$file" 2>/dev/null
+  id=$1
+  state=$2
+  text=$3
+  file=$4
+  tab=$(printf '\t')
+  grep -Fxq "${id}${tab}${state}${tab}${text}" "$file" 2>/dev/null
 }
 
 [ -x "$signal_number" ] || {
@@ -50,7 +53,7 @@ fi
 
 # Slow commands do not block independent blocks.
 cat >"$tmp/async.conf" <<'EOC'
-status = { protocol = "rawm-v1"; delimiter = " | "; };
+status = { protocol = "rawm-v2"; };
 blocks = (
   {
     name = "slow";
@@ -70,14 +73,14 @@ EOC
 : >"$tmp/stderr"
 "$rawmstat" -p -c "$tmp/async.conf" >"$tmp/stdout" 2>"$tmp/stderr" &
 pid=$!
-wait_for 50 wait_line fast "$tmp/stdout" || fail "slow block stalled fast block"
+wait_for 50 wait_sample fast normal fast "$tmp/stdout" || fail "slow block stalled fast block"
 kill -TERM "$pid"
 wait "$pid" || fail "async test did not terminate cleanly"
 pid=
 
 # Timeout owns and kills the complete child process group.
 cat >"$tmp/timeout.conf" <<EOF2
-status = { protocol = "rawm-v1"; delimiter = " | "; };
+status = { protocol = "rawm-v2"; };
 blocks = (
   {
     name = "hung";
@@ -112,7 +115,7 @@ EOF2
 chmod +x "$tmp/sample.sh"
 printf '%s' good1 >"$tmp/value"
 cat >"$tmp/failure.conf" <<EOF2
-status = { protocol = "rawm-v1"; delimiter = " | "; };
+status = { protocol = "rawm-v2"; };
 blocks = (
   {
     name = "sample";
@@ -127,7 +130,7 @@ EOF2
 : >"$tmp/stderr"
 "$rawmstat" -p -c "$tmp/failure.conf" >"$tmp/stdout" 2>"$tmp/stderr" &
 pid=$!
-wait_for 100 wait_line good1 "$tmp/stdout" || fail "initial successful sample missing"
+wait_for 100 wait_sample sample normal good1 "$tmp/stdout" || fail "initial successful sample missing"
 printf '%s' fail >"$tmp/value"
 kill -"$update_signal" "$pid"
 wait_for 100 grep -q "exited with status 7" "$tmp/stderr" || fail "failed sample was not reported"
@@ -136,7 +139,7 @@ if grep -Fq bad "$tmp/stdout"; then
 fi
 printf '%s' good2 >"$tmp/value"
 kill -"$update_signal" "$pid"
-wait_for 100 wait_line good2 "$tmp/stdout" || fail "successful recovery sample missing"
+wait_for 100 wait_sample sample normal good2 "$tmp/stdout" || fail "successful recovery sample missing"
 kill -TERM "$pid"
 wait "$pid" || fail "failure retention test did not terminate cleanly"
 pid=
@@ -153,7 +156,7 @@ printf '%s' "\$n"
 EOF2
 chmod +x "$tmp/coalesce.sh"
 cat >"$tmp/coalesce.conf" <<EOF2
-status = { protocol = "rawm-v1"; delimiter = " | "; };
+status = { protocol = "rawm-v2"; };
 blocks = (
   {
     name = "coalesce";
@@ -172,7 +175,7 @@ wait_for 50 grep -qx 1 "$tmp/count" || fail "coalescing block did not start"
 kill -"$update_signal" "$pid"
 sleep 0.05
 kill -"$update_signal" "$pid"
-wait_for 100 wait_line 2 "$tmp/stdout" || fail "pending rerun did not execute"
+wait_for 100 wait_sample coalesce normal 2 "$tmp/stdout" || fail "pending rerun did not execute"
 sleep 0.35
 [ "$(cat "$tmp/count")" = 2 ] || fail "refresh requests spawned more than one pending rerun"
 kill -TERM "$pid"
@@ -181,7 +184,7 @@ pid=
 
 # SIGHUP restarts in place and reloads configuration.
 cat >"$tmp/reload.conf" <<'EOC'
-status = { protocol = "rawm-v1"; delimiter = " | "; };
+status = { protocol = "rawm-v2"; };
 blocks = ({ name = "reload"; command = ("printf", "one"); interval = 0; timeout_ms = 1000; });
 EOC
 : >"$tmp/stdout"
@@ -189,13 +192,13 @@ EOC
 "$rawmstat" -p -c "$tmp/reload.conf" >"$tmp/stdout" 2>"$tmp/stderr" &
 pid=$!
 original_pid=$pid
-wait_for 100 wait_line one "$tmp/stdout" || fail "pre-reload sample missing"
+wait_for 100 wait_sample reload normal one "$tmp/stdout" || fail "pre-reload sample missing"
 cat >"$tmp/reload.conf" <<'EOC'
-status = { protocol = "rawm-v1"; delimiter = " | "; };
+status = { protocol = "rawm-v2"; };
 blocks = ({ name = "reload"; command = ("printf", "two"); interval = 0; timeout_ms = 1000; });
 EOC
 kill -HUP "$pid"
-wait_for 100 wait_line two "$tmp/stdout" || fail "SIGHUP did not reload configuration"
+wait_for 100 wait_sample reload normal two "$tmp/stdout" || fail "SIGHUP did not reload configuration"
 [ "$pid" = "$original_pid" ] || fail "SIGHUP changed process id"
 kill -TERM "$pid"
 wait "$pid" || fail "reload test did not terminate cleanly"

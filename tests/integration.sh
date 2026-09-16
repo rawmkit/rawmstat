@@ -61,13 +61,13 @@ ui = {
   bar = { show = true; position = "bottom"; height = 24; };
   systray = { show = false; };
 };
-status = { enabled = true; protocol = "rawm-v1"; };
+status = { enabled = true; protocol = "rawm-v2"; };
 input = { keys = (); buttons = (); };
 EOC
 
 printf '%s' one >"$tmp/value"
 cat >"$tmp/rawmstat.conf" <<EOF2
-status = { protocol = "rawm-v1"; delimiter = " | "; };
+status = { protocol = "rawm-v2"; };
 blocks = (
   {
     name = "hung";
@@ -106,7 +106,7 @@ producer=$!
 property_is()
 {
   expected=$1
-  xprop -notype -root _RAWM_STATUS_V1 2>/dev/null | grep -Fq "\"$expected\""
+  xprop -notype -root _RAWM_STATUS_V2 2>/dev/null | grep -Fq "\"$expected\""
 }
 checksum_changed()
 {
@@ -115,13 +115,13 @@ checksum_changed()
   [ "$current" != "$old" ]
 }
 
-wait_for 100 property_is one || fail "rawmstat did not publish initial status while another block was hung"
+wait_for 100 property_is 'probe\tnormal\tone\n' || fail "rawmstat did not publish initial status while another block was hung"
 wait_for 100 checksum_changed "$baseline" || fail "rawm did not render rawmstat's initial status"
 one_hash=$($bar_checksum)
 
-printf '%s' two >"$tmp/value"
+printf 'critical\ttwo' >"$tmp/value"
 kill -"$update_signal" "$producer"
-wait_for 100 property_is two || fail "signal update did not reach _RAWM_STATUS_V1"
+wait_for 100 property_is 'probe\tcritical\ttwo\n' || fail "semantic signal update did not reach _RAWM_STATUS_V2"
 wait_for 100 checksum_changed "$one_hash" || fail "rawm bar did not redraw after rawmstat update"
 wait_for 100 grep -q "block 'hung' timed out" "$tmp/rawmstat.log" || fail "hung integration block did not time out"
 

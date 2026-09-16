@@ -38,10 +38,11 @@ fi
 
 printf '%s' one >"$tmp/value"
 cat >"$tmp/rawmstat.conf" <<EOF2
-status = { protocol = "rawm-v1"; delimiter = " | "; };
+status = { protocol = "rawm-v2"; };
 blocks = (
   {
     name = "probe";
+    prefix = "p:";
     command = ("cat", "$tmp/value");
     interval = 0;
     signal = 1;
@@ -71,7 +72,7 @@ wait_property()
   expected=$1
   n=0
   while :; do
-    value=$(xprop -notype -root _RAWM_STATUS_V1 2>/dev/null || true)
+    value=$(xprop -notype -root _RAWM_STATUS_V2 2>/dev/null || true)
     printf '%s\n' "$value" | grep -Fq "\"$expected\"" && return 0
     n=$((n + 1))
     [ "$n" -lt 100 ] || return 1
@@ -79,46 +80,75 @@ wait_property()
   done
 }
 
-wait_property one || {
-  cat "$tmp/stderr" >&2
-  fail "initial rawm-v1 property was not published"
+property_payload()
+{
+  xprop -notype -root _RAWM_STATUS_V2 2>/dev/null |
+    sed -n 's/^[^\"]*\"\(.*\)\"$/\1/p'
 }
-xprop -root _RAWM_STATUS_V1 | grep -q '(UTF8_STRING)' ||
+
+wait_property 'probe\tnormal\tp:one\n' || {
+  cat "$tmp/stderr" >&2
+  fail "initial rawm-v2 property was not published"
+}
+xprop -root _RAWM_STATUS_V2 | grep -q '(UTF8_STRING)' ||
   fail "status property does not use UTF8_STRING"
 
-
-printf '%s' two >"$tmp/value"
+# A recognized semantic prefix is consumed by rawmstat and becomes the
+# segment state rather than presentation markup in the text.
+printf 'warning\ttwo' >"$tmp/value"
 kill -"$update_signal" "$pid"
-wait_property two || {
+wait_property 'probe\twarning\tp:two\n' || {
   cat "$tmp/stderr" >&2
-  fail "signal-triggered block update was not published"
+  fail "warning state was not published"
 }
 
-property_length()
-{
-  payload=$(xprop -notype -root _RAWM_STATUS_V1 2>/dev/null |
-    sed -n 's/^[^"]*"\(.*\)"$/\1/p')
-  [ "${#payload}" -eq "$1" ]
-}
-
-# rawm-v1 accepts its complete 4096-byte payload and rejects a larger sample
-# without replacing the last successful value.
-dd if=/dev/zero bs=4096 count=1 2>/dev/null | tr '\000' x >"$tmp/value"
+printf 'critical\tthree' >"$tmp/value"
 kill -"$update_signal" "$pid"
-wait_property "$(cat "$tmp/value")" || {
+wait_property 'probe\tcritical\tp:three\n' || {
   cat "$tmp/stderr" >&2
-  fail "4096-byte rawm-v1 payload was not published"
+  fail "critical state was not published"
 }
-property_length 4096 || fail "published rawm-v1 boundary payload has wrong length"
-printf x >>"$tmp/value"
+
+# Unknown state-like prefixes leave a tab in the sample text and are invalid;
+# the last successful sample must remain published.
+printf 'unknown\tbad' >"$tmp/value"
 kill -"$update_signal" "$pid"
-wait_for_invalid=0
-while ! grep -q "invalid rawm-v1 text (too long)" "$tmp/stderr"; do
-  wait_for_invalid=$((wait_for_invalid + 1))
-  [ "$wait_for_invalid" -lt 100 ] || fail "oversized block output was not rejected"
+n=0
+while ! grep -q "sample text must be printable UTF-8" "$tmp/stderr"; do
+  n=$((n + 1))
+  [ "$n" -lt 100 ] || fail "invalid semantic sample was not rejected"
   sleep 0.02
 done
-property_length 4096 || fail "oversized sample replaced last valid rawm-v1 payload"
+wait_property 'probe\tcritical\tp:three\n' ||
+  fail "invalid semantic sample replaced the last good value"
+
+# One probe record has 14 bytes of wire framing, and this test block adds a
+# two-byte prefix. 4080 command-output bytes therefore produce the exact
+# 4096-byte rawm-v2 boundary payload.
+dd if=/dev/zero bs=4080 count=1 2>/dev/null | tr '\000' x >"$tmp/value"
+kill -"$update_signal" "$pid"
+n=0
+while :; do
+  payload=$(property_payload)
+  [ "${#payload}" -eq 4099 ] && break # xprop escapes two tabs and newline
+  n=$((n + 1))
+  [ "$n" -lt 100 ] || {
+    cat "$tmp/stderr" >&2
+    fail "4096-byte rawm-v2 payload was not published"
+  }
+  sleep 0.02
+done
+
+printf x >>"$tmp/value"
+kill -"$update_signal" "$pid"
+n=0
+while ! grep -q "composed status exceeds rawm-v2 4096-byte limit" "$tmp/stderr"; do
+  n=$((n + 1))
+  [ "$n" -lt 100 ] || fail "oversized rawm-v2 payload was not rejected"
+  sleep 0.02
+done
+payload=$(property_payload)
+[ "${#payload}" -eq 4099 ] || fail "oversized sample replaced last valid rawm-v2 payload"
 
 kill -TERM "$pid"
 wait "$pid" || fail "rawmstat did not terminate cleanly"

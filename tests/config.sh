@@ -42,8 +42,7 @@ expect_ok rawmstat.conf
 
 cat >"$tmp/valid.conf" <<'EOC'
 status = {
-  protocol = "rawm-v1";
-  delimiter = " :: ";
+  protocol = "rawm-v2";
 };
 blocks = (
   {
@@ -64,7 +63,7 @@ EOC
 expect_ok "$tmp/valid.conf"
 
 cat >"$tmp/unknown.conf" <<'EOC'
-status = { protcol = "rawm-v1"; };
+status = { protcol = "rawm-v2"; };
 EOC
 expect_fail "$tmp/unknown.conf"
 
@@ -139,8 +138,18 @@ wait_for_output "$tmp/stdout" || {
 kill -TERM "$pid"
 wait "$pid" || fail "rawmstat did not terminate cleanly"
 pid=
-[ "$(sed -n '1p' "$tmp/stdout")" = "user-config" ] ||
+[ "$(sed -n '1p' "$tmp/stdout")" = "$(printf 'user\tnormal\tuser-config')" ] ||
   fail "user block list did not replace built-in blocks"
+
+cat >"$tmp/invalid-id.conf" <<'EOC'
+blocks = ({ name = "not a valid id"; command = ("true"); });
+EOC
+expect_fail "$tmp/invalid-id.conf"
+
+cat >"$tmp/legacy-delimiter.conf" <<'EOC'
+status = { protocol = "rawm-v2"; delimiter = " | "; };
+EOC
+expect_fail "$tmp/legacy-delimiter.conf"
 
 cat >"$tmp/xdg/rawm/rawmstat.conf" <<'EOC'
 this_is_invalid = true;
