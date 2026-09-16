@@ -94,6 +94,32 @@ wait_property two || {
   fail "signal-triggered block update was not published"
 }
 
+property_length()
+{
+  payload=$(xprop -notype -root _RAWM_STATUS_V1 2>/dev/null |
+    sed -n 's/^[^"]*"\(.*\)"$/\1/p')
+  [ "${#payload}" -eq "$1" ]
+}
+
+# rawm-v1 accepts its complete 4096-byte payload and rejects a larger sample
+# without replacing the last successful value.
+dd if=/dev/zero bs=4096 count=1 2>/dev/null | tr '\000' x >"$tmp/value"
+kill -"$update_signal" "$pid"
+wait_property "$(cat "$tmp/value")" || {
+  cat "$tmp/stderr" >&2
+  fail "4096-byte rawm-v1 payload was not published"
+}
+property_length 4096 || fail "published rawm-v1 boundary payload has wrong length"
+printf x >>"$tmp/value"
+kill -"$update_signal" "$pid"
+wait_for_invalid=0
+while ! grep -q "invalid rawm-v1 text (too long)" "$tmp/stderr"; do
+  wait_for_invalid=$((wait_for_invalid + 1))
+  [ "$wait_for_invalid" -lt 100 ] || fail "oversized block output was not rejected"
+  sleep 0.02
+done
+property_length 4096 || fail "oversized sample replaced last valid rawm-v1 payload"
+
 kill -TERM "$pid"
 wait "$pid" || fail "rawmstat did not terminate cleanly"
 pid=

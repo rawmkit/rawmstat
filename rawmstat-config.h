@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
-#define RAWMSTAT_RAWM_V1_MAX 255u
+#define RAWMSTAT_RAWM_V1_MAX 4096u
 #define RAWMSTAT_DEFAULT_TIMEOUT_MS 2000u
 
 typedef enum {
