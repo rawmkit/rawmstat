@@ -134,17 +134,51 @@ rawmstat_utf8_valid(const unsigned char *text, size_t length)
   return 1;
 }
 
+int
+rawmstat_status_text_valid(const unsigned char *text, size_t length)
+{
+  size_t i;
+
+  if (!rawmstat_utf8_valid(text, length))
+    return 0;
+  for (i = 0; i < length; ++i)
+    if (text[i] < 0x20 || text[i] == 0x7f)
+      return 0;
+  return 1;
+}
+
+static int
+status_id_valid(const char *name)
+{
+  size_t i, length;
+
+  if (!name)
+    return 0;
+  length = strlen(name);
+  if (!length || length > RAWMSTAT_STATUS_ID_MAX)
+    return 0;
+  for (i = 0; i < length; ++i) {
+    unsigned char c = (unsigned char)name[i];
+
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')
+      continue;
+    return 0;
+  }
+  return 1;
+}
+
 const char *
 rawmstat_protocol_name(RawmstatProtocol protocol)
 {
-  return protocol == RAWMSTAT_PROTOCOL_RAWM_V1 ? "rawm-v1" : NULL;
+  return protocol == RAWMSTAT_PROTOCOL_RAWM_V2 ? "rawm-v2" : NULL;
 }
 
 static int
 parse_protocol(const char *name, RawmstatProtocol *protocol)
 {
-  if (!strcmp(name, "rawm-v1")) {
-    *protocol = RAWMSTAT_PROTOCOL_RAWM_V1;
+  if (!strcmp(name, "rawm-v2")) {
+    *protocol = RAWMSTAT_PROTOCOL_RAWM_V2;
     return 0;
   }
   return -1;
@@ -158,8 +192,7 @@ rawmstat_config_init(RawmstatConfig *cfg)
   size_t i;
 
   memset(cfg, 0, sizeof(*cfg));
-  cfg->protocol = RAWMSTAT_PROTOCOL_RAWM_V1;
-  cfg->delimiter = xstrdup(" | ");
+  cfg->protocol = RAWMSTAT_PROTOCOL_RAWM_V2;
   cfg->blocks = xcalloc(1, sizeof(*cfg->blocks));
   cfg->block_count = 1;
 
@@ -178,7 +211,6 @@ rawmstat_config_init(RawmstatConfig *cfg)
 void
 rawmstat_config_destroy(RawmstatConfig *cfg)
 {
-  free(cfg->delimiter);
   free_blocks(cfg->blocks, cfg->block_count);
   memset(cfg, 0, sizeof(*cfg));
 }
@@ -232,11 +264,11 @@ validate_members(FILE *err, const config_setting_t *group,
 static int
 parse_status(FILE *err, RawmstatConfig *cfg, const config_setting_t *group)
 {
-  static const char *const allowed[] = { "protocol", "delimiter" };
+  static const char *const allowed[] = { "protocol" };
   config_setting_t *setting;
   const char *value;
 
-  if (validate_members(err, group, allowed, 2) < 0)
+  if (validate_members(err, group, allowed, 1) < 0)
     return -1;
 
   setting = config_setting_get_member(group, "protocol");
@@ -248,12 +280,6 @@ parse_status(FILE *err, RawmstatConfig *cfg, const config_setting_t *group)
       return cfg_error(err, setting, "unsupported status protocol '%s'", value);
   }
 
-  setting = config_setting_get_member(group, "delimiter");
-  if (setting) {
-    if (config_setting_type(setting) != CONFIG_TYPE_STRING)
-      return cfg_error(err, setting, "status.delimiter must be a string%s", "");
-    replace_string(&cfg->delimiter, config_setting_get_string(setting));
-  }
   return 0;
 }
 
@@ -499,27 +525,17 @@ rawmstat_config_validate(const RawmstatConfig *cfg, FILE *err)
     fputs("rawmstat: configuration error: invalid status protocol\n", err);
     return -1;
   }
-  if (!cfg->delimiter) {
-    fputs("rawmstat: configuration error: status.delimiter is missing\n", err);
-    return -1;
-  }
-  if (strlen(cfg->delimiter) > RAWMSTAT_RAWM_V1_MAX ||
-      !rawmstat_utf8_valid((const unsigned char *)cfg->delimiter,
-                           strlen(cfg->delimiter))) {
-    fputs("rawmstat: configuration error: status.delimiter must be valid UTF-8 within the rawm-v1 limit\n", err);
-    return -1;
-  }
   for (i = 0; i < cfg->block_count; ++i) {
     const RawmstatBlock *block = &cfg->blocks[i];
 
-    if (!block->name || !*block->name) {
-      fputs("rawmstat: configuration error: block name must not be empty\n", err);
+    if (!status_id_valid(block->name)) {
+      fputs("rawmstat: configuration error: block name must be 1..64 characters from [A-Za-z0-9._-]\n", err);
       return -1;
     }
-    if (!block->prefix || strlen(block->prefix) > RAWMSTAT_RAWM_V1_MAX ||
-        !rawmstat_utf8_valid((const unsigned char *)block->prefix,
-                             strlen(block->prefix))) {
-      fprintf(err, "rawmstat: configuration error: block '%s' prefix must be valid UTF-8 within the rawm-v1 limit\n",
+    if (!block->prefix || strlen(block->prefix) > RAWMSTAT_RAWM_V2_MAX ||
+        !rawmstat_status_text_valid((const unsigned char *)block->prefix,
+                                    strlen(block->prefix))) {
+      fprintf(err, "rawmstat: configuration error: block '%s' prefix must be printable UTF-8 within the rawm-v2 limit\n",
               block->name);
       return -1;
     }

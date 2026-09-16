@@ -28,8 +28,15 @@
 
 #define RAWMSTAT_SHUTDOWN_GRACE_MS 500u
 
+typedef enum {
+  RAWMSTAT_STATE_NORMAL,
+  RAWMSTAT_STATE_WARNING,
+  RAWMSTAT_STATE_CRITICAL
+} RawmstatState;
+
 typedef struct {
   char *text;
+  RawmstatState state;
   uint64_t next_update;
   bool active;
   bool pending;
@@ -273,7 +280,7 @@ start_block(const RawmstatBlock *block, BlockState *state, uint64_t now)
   state->fd = fds[0];
   state->wait_status = 0;
   state->deadline = now + block->timeout_ms;
-  state->output = xmalloc((size_t)RAWMSTAT_RAWM_V1_MAX + 1);
+  state->output = xmalloc((size_t)RAWMSTAT_RAWM_V2_MAX + 1);
   state->output_len = 0;
   state->line_done = false;
   state->too_long = false;
@@ -308,7 +315,7 @@ read_block_output(BlockState *state)
           state->embedded_nul = true;
           continue;
         }
-        if (state->output_len < RAWMSTAT_RAWM_V1_MAX)
+        if (state->output_len < RAWMSTAT_RAWM_V2_MAX)
           state->output[state->output_len++] = ch;
         else
           state->too_long = true;
@@ -353,17 +360,47 @@ reap_children(BlockState *states, size_t count)
   }
 }
 
+static const char *
+state_name(RawmstatState state)
+{
+  switch (state) {
+  case RAWMSTAT_STATE_WARNING:
+    return "warning";
+  case RAWMSTAT_STATE_CRITICAL:
+    return "critical";
+  case RAWMSTAT_STATE_NORMAL:
+  default:
+    return "normal";
+  }
+}
+
 static int
-set_block_text(BlockState *state, const char *text)
+parse_state(const unsigned char *text, size_t length, RawmstatState *state)
+{
+  if (length == 6 && !memcmp(text, "normal", 6))
+    *state = RAWMSTAT_STATE_NORMAL;
+  else if (length == 7 && !memcmp(text, "warning", 7))
+    *state = RAWMSTAT_STATE_WARNING;
+  else if (length == 8 && !memcmp(text, "critical", 8))
+    *state = RAWMSTAT_STATE_CRITICAL;
+  else
+    return 0;
+  return 1;
+}
+
+static int
+set_block_sample(BlockState *state, RawmstatState sample_state,
+                 const char *text)
 {
   char *copy = xstrdup(text);
 
-  if (state->text && !strcmp(state->text, copy)) {
+  if (state->text && state->state == sample_state && !strcmp(state->text, copy)) {
     free(copy);
     return 0;
   }
   free(state->text);
   state->text = copy;
+  state->state = sample_state;
   return 1;
 }
 
@@ -372,8 +409,12 @@ finish_block(const RawmstatBlock *block, BlockState *state)
 {
   bool success;
   int changed = 0;
-  size_t prefix_len, total;
+  size_t prefix_len, total, sample_len;
+  const unsigned char *sample;
+  const unsigned char *tab;
+  RawmstatState sample_state = RAWMSTAT_STATE_NORMAL;
   char *text;
+  const char *sample_error = NULL;
 
   if (!state->active || state->pid > 0 || state->fd >= 0)
     return 0;
@@ -389,34 +430,43 @@ finish_block(const RawmstatBlock *block, BlockState *state)
   while (state->output_len && state->output[state->output_len - 1] == '\r')
     --state->output_len;
 
-  if (success && !rawmstat_utf8_valid(state->output, state->output_len)) {
-    fprintf(stderr, "rawmstat: block '%s' produced invalid UTF-8\n",
-            block->name);
+  sample = state->output;
+  sample_len = state->output_len;
+  if (success && sample_len) {
+    tab = memchr(sample, '\t', sample_len);
+    if (tab) {
+      size_t state_len = (size_t)(tab - sample);
+      RawmstatState parsed;
+
+      if (parse_state(sample, state_len, &parsed)) {
+        sample_state = parsed;
+        sample_len -= state_len + 1;
+        sample = tab + 1;
+      }
+    }
+  }
+
+  if (success && sample_len &&
+      !rawmstat_status_text_valid(sample, sample_len)) {
+    sample_error = "sample text must be printable UTF-8";
     success = false;
   }
 
-  if (success && state->output_len == 0) {
-    changed = set_block_text(state, "");
+  if (success && sample_len == 0) {
+    changed = set_block_sample(state, RAWMSTAT_STATE_NORMAL, "");
   } else if (success) {
     prefix_len = strlen(block->prefix);
-    total = prefix_len + state->output_len;
-    if (total > RAWMSTAT_RAWM_V1_MAX) {
-      fprintf(stderr,
-              "rawmstat: block '%s' text exceeds rawm-v1 limit\n",
-              block->name);
+    total = prefix_len + sample_len;
+    if (total > RAWMSTAT_RAWM_V2_MAX) {
+      sample_error = "sample text exceeds rawm-v2 limit";
       success = false;
     } else {
       text = xmalloc(total + 1);
       memcpy(text, block->prefix, prefix_len);
-      memcpy(text + prefix_len, state->output, state->output_len);
+      memcpy(text + prefix_len, sample, sample_len);
       text[total] = '\0';
-      if (state->text && !strcmp(state->text, text)) {
-        free(text);
-      } else {
-        free(state->text);
-        state->text = text;
-        changed = 1;
-      }
+      changed = set_block_sample(state, sample_state, text);
+      free(text);
     }
   }
 
@@ -427,8 +477,12 @@ finish_block(const RawmstatBlock *block, BlockState *state)
               block->name);
     } else if (state->too_long || state->embedded_nul) {
       fprintf(stderr,
-              "rawmstat: block '%s' produced invalid rawm-v1 text%s\n",
+              "rawmstat: block '%s' produced invalid rawm-v2 text%s\n",
               block->name, state->too_long ? " (too long)" : "");
+    } else if (sample_error) {
+      fprintf(stderr,
+              "rawmstat: block '%s' produced invalid rawm-v2 sample: %s; keeping previous value\n",
+              block->name, sample_error);
     } else if (WIFEXITED(state->wait_status)) {
       fprintf(stderr,
               "rawmstat: block '%s' exited with status %d; keeping previous value\n",
@@ -477,50 +531,49 @@ static char *
 build_status(const RawmstatConfig *cfg, const BlockState *states)
 {
   size_t i, len = 0;
-  bool first = true;
-  size_t delimiter_len = strlen(cfg->delimiter);
   char *status;
-
-  if (!rawmstat_utf8_valid((const unsigned char *)cfg->delimiter,
-                           delimiter_len)) {
-    fputs("rawmstat: status delimiter is not valid UTF-8\n", stderr);
-    return NULL;
-  }
 
   for (i = 0; i < cfg->block_count; ++i) {
     const char *text = states[i].text ? states[i].text : "";
-    size_t text_len = strlen(text);
-    size_t extra;
+    const char *state = state_name(states[i].state);
+    size_t id_len, state_len, text_len, extra;
 
-    if (!text_len)
+    if (!text[0])
       continue;
-    extra = text_len + (first ? 0 : delimiter_len);
-    if (extra > RAWMSTAT_RAWM_V1_MAX - len) {
+    id_len = strlen(cfg->blocks[i].name);
+    state_len = strlen(state);
+    text_len = strlen(text);
+    extra = id_len + 1 + state_len + 1 + text_len + 1;
+    if (extra > RAWMSTAT_RAWM_V2_MAX - len) {
       fprintf(stderr,
-              "rawmstat: composed status exceeds rawm-v1 %u-byte limit\n",
-              RAWMSTAT_RAWM_V1_MAX);
+              "rawmstat: composed status exceeds rawm-v2 %u-byte limit\n",
+              RAWMSTAT_RAWM_V2_MAX);
       return NULL;
     }
     len += extra;
-    first = false;
   }
 
   status = xmalloc(len + 1);
   len = 0;
-  first = true;
   for (i = 0; i < cfg->block_count; ++i) {
     const char *text = states[i].text ? states[i].text : "";
-    size_t text_len = strlen(text);
+    const char *state = state_name(states[i].state);
+    size_t id_len, state_len, text_len;
 
-    if (!text_len)
+    if (!text[0])
       continue;
-    if (!first) {
-      memcpy(status + len, cfg->delimiter, delimiter_len);
-      len += delimiter_len;
-    }
+    id_len = strlen(cfg->blocks[i].name);
+    state_len = strlen(state);
+    text_len = strlen(text);
+    memcpy(status + len, cfg->blocks[i].name, id_len);
+    len += id_len;
+    status[len++] = '\t';
+    memcpy(status + len, state, state_len);
+    len += state_len;
+    status[len++] = '\t';
     memcpy(status + len, text, text_len);
     len += text_len;
-    first = false;
+    status[len++] = '\n';
   }
   status[len] = '\0';
   return status;
@@ -539,7 +592,7 @@ setup_x(void)
   }
   screen = DefaultScreen(dpy);
   root = RootWindow(dpy, screen);
-  status_atom = XInternAtom(dpy, "_RAWM_STATUS_V1", False);
+  status_atom = XInternAtom(dpy, "_RAWM_STATUS_V2", False);
   utf8_atom = XInternAtom(dpy, "UTF8_STRING", False);
   return 0;
 }
@@ -562,7 +615,7 @@ publish_status(const char *status, bool stdout_mode, char **last)
   *last = xstrdup(status);
 
   if (stdout_mode) {
-    puts(status);
+    fputs(status, stdout);
     fflush(stdout);
     return 0;
   }
