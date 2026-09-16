@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -25,9 +26,25 @@
 #define VERSION "unknown"
 #endif
 
+#define RAWMSTAT_SHUTDOWN_GRACE_MS 500u
+
 typedef struct {
   char *text;
   uint64_t next_update;
+  bool active;
+  bool pending;
+  bool timed_out;
+  pid_t pid;
+  pid_t pgid;
+  int fd;
+  int wait_status;
+  uint64_t deadline;
+  unsigned char *output;
+  size_t output_len;
+  bool line_done;
+  bool too_long;
+  bool embedded_nul;
+  bool read_error;
 } BlockState;
 
 static int signal_pipe[2] = { -1, -1 };
@@ -52,6 +69,18 @@ static void *
 xmalloc(size_t size)
 {
   void *p = malloc(size ? size : 1);
+
+  if (!p) {
+    fputs("rawmstat: out of memory\n", stderr);
+    exit(EXIT_FAILURE);
+  }
+  return p;
+}
+
+static void *
+xcalloc(size_t n, size_t size)
+{
+  void *p = calloc(n ? n : 1, size ? size : 1);
 
   if (!p) {
     fputs("rawmstat: out of memory\n", stderr);
@@ -98,6 +127,16 @@ set_nonblock_cloexec(int fd)
   return 0;
 }
 
+static int
+set_cloexec(int fd)
+{
+  int flags = fcntl(fd, F_GETFD, 0);
+
+  if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0)
+    return -1;
+  return 0;
+}
+
 static void
 signal_handler(int signum)
 {
@@ -132,7 +171,9 @@ setup_signals(const RawmstatConfig *cfg)
     return -1;
   }
   if (install_signal_handler(SIGINT) < 0 ||
-      install_signal_handler(SIGTERM) < 0) {
+      install_signal_handler(SIGTERM) < 0 ||
+      install_signal_handler(SIGHUP) < 0 ||
+      install_signal_handler(SIGCHLD) < 0) {
     perror("rawmstat: sigaction");
     return -1;
   }
@@ -165,28 +206,42 @@ close_signals(void)
   signal_pipe[0] = signal_pipe[1] = -1;
 }
 
-static int
-run_block(const RawmstatBlock *block, BlockState *state)
+static bool
+block_running(const BlockState *state)
 {
-  unsigned char line[RAWMSTAT_STATUS_MAX + 1];
-  unsigned char buffer[512];
-  size_t line_len = 0;
-  bool line_done = false;
-  bool too_long = false;
-  bool embedded_nul = false;
+  return state->active;
+}
+
+static void
+kill_block_group(const BlockState *state, int signum)
+{
+  if (state->pgid <= 0)
+    return;
+  if (kill(-state->pgid, signum) < 0 && errno != ESRCH &&
+      state->pid > 0)
+    (void)kill(state->pid, signum);
+}
+
+static int
+start_block(const RawmstatBlock *block, BlockState *state, uint64_t now)
+{
   int fds[2];
   pid_t pid;
-  int status;
-  ssize_t n;
-  char *text;
-  size_t prefix_len, total;
 
+  if (block_running(state)) {
+    state->pending = true;
+    return 0;
+  }
   if (pipe(fds) < 0) {
     perror("rawmstat: pipe");
     return -1;
   }
-  (void)fcntl(fds[0], F_SETFD, FD_CLOEXEC);
-  (void)fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+  if (set_nonblock_cloexec(fds[0]) < 0 || set_cloexec(fds[1]) < 0) {
+    perror("rawmstat: block pipe");
+    close(fds[0]);
+    close(fds[1]);
+    return -1;
+  }
 
   pid = fork();
   if (pid < 0) {
@@ -196,6 +251,7 @@ run_block(const RawmstatBlock *block, BlockState *state)
     return -1;
   }
   if (pid == 0) {
+    (void)setpgid(0, 0);
     if (dup2(fds[1], STDOUT_FILENO) < 0)
       _exit(127);
     close(fds[0]);
@@ -206,94 +262,229 @@ run_block(const RawmstatBlock *block, BlockState *state)
   }
 
   close(fds[1]);
-  while ((n = read(fds[0], buffer, sizeof(buffer))) != 0) {
-    ssize_t i;
+  if (setpgid(pid, pid) < 0 && errno != EACCES && errno != ESRCH)
+    perror("rawmstat: setpgid");
 
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      perror("rawmstat: read block output");
-      close(fds[0]);
-      (void)waitpid(pid, NULL, 0);
-      return -1;
-    }
-    for (i = 0; i < n; ++i) {
-      unsigned char ch = buffer[i];
+  state->active = true;
+  state->pending = false;
+  state->timed_out = false;
+  state->pid = pid;
+  state->pgid = pid;
+  state->fd = fds[0];
+  state->wait_status = 0;
+  state->deadline = now + block->timeout_ms;
+  state->output = xmalloc((size_t)RAWMSTAT_RAWM_V1_MAX + 1);
+  state->output_len = 0;
+  state->line_done = false;
+  state->too_long = false;
+  state->embedded_nul = false;
+  state->read_error = false;
+  return 0;
+}
 
-      if (line_done)
-        continue;
-      if (ch == '\n') {
-        line_done = true;
-        continue;
+static void
+read_block_output(BlockState *state)
+{
+  unsigned char buffer[512];
+  ssize_t n;
+
+  if (state->fd < 0)
+    return;
+  for (;;) {
+    n = read(state->fd, buffer, sizeof(buffer));
+    if (n > 0) {
+      ssize_t i;
+
+      for (i = 0; i < n; ++i) {
+        unsigned char ch = buffer[i];
+
+        if (state->line_done)
+          continue;
+        if (ch == '\n') {
+          state->line_done = true;
+          continue;
+        }
+        if (ch == '\0') {
+          state->embedded_nul = true;
+          continue;
+        }
+        if (state->output_len < RAWMSTAT_RAWM_V1_MAX)
+          state->output[state->output_len++] = ch;
+        else
+          state->too_long = true;
       }
-      if (ch == '\0') {
-        embedded_nul = true;
-        continue;
+      continue;
+    }
+    if (n == 0) {
+      close(state->fd);
+      state->fd = -1;
+      return;
+    }
+    if (errno == EINTR)
+      continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      return;
+    perror("rawmstat: read block output");
+    close(state->fd);
+    state->fd = -1;
+    state->read_error = true;
+    return;
+  }
+}
+
+static void
+reap_children(BlockState *states, size_t count)
+{
+  int status;
+  pid_t pid;
+  size_t i;
+
+  for (;;) {
+    pid = waitpid(-1, &status, WNOHANG);
+    if (pid <= 0)
+      break;
+    for (i = 0; i < count; ++i) {
+      if (states[i].active && states[i].pid == pid) {
+        states[i].pid = 0;
+        states[i].wait_status = status;
+        break;
       }
-      if (line_len < RAWMSTAT_STATUS_MAX)
-        line[line_len++] = ch;
-      else
-        too_long = true;
     }
   }
-  close(fds[0]);
+}
 
-  while (waitpid(pid, &status, 0) < 0) {
-    if (errno != EINTR) {
-      perror("rawmstat: waitpid");
-      return -1;
-    }
-  }
+static int
+set_block_text(BlockState *state, const char *text)
+{
+  char *copy = xstrdup(text);
 
-  if (too_long || embedded_nul) {
-    fprintf(stderr,
-            "rawmstat: block '%s' produced invalid rawm-v1 text%s\n",
-            block->name, too_long ? " (too long)" : "");
-    return -1;
-  }
-  while (line_len && line[line_len - 1] == '\r')
-    --line_len;
-  if (!rawmstat_utf8_valid(line, line_len)) {
-    fprintf(stderr, "rawmstat: block '%s' produced invalid UTF-8\n",
-            block->name);
-    return -1;
-  }
-  if (WIFEXITED(status) && WEXITSTATUS(status) == 127 && line_len == 0)
-    return -1;
-
-  prefix_len = strlen(block->prefix);
-  total = prefix_len + line_len;
-  if (total > RAWMSTAT_STATUS_MAX) {
-    fprintf(stderr, "rawmstat: block '%s' text exceeds rawm-v1 limit\n",
-            block->name);
-    return -1;
-  }
-  text = xmalloc(total + 1);
-  memcpy(text, block->prefix, prefix_len);
-  memcpy(text + prefix_len, line, line_len);
-  text[total] = '\0';
-
-  if (state->text && !strcmp(state->text, text)) {
-    free(text);
+  if (state->text && !strcmp(state->text, copy)) {
+    free(copy);
     return 0;
   }
   free(state->text);
-  state->text = text;
+  state->text = copy;
   return 1;
 }
 
 static int
-build_status(const RawmstatConfig *cfg, const BlockState *states, char *status,
-             size_t size)
+finish_block(const RawmstatBlock *block, BlockState *state)
+{
+  bool success;
+  int changed = 0;
+  size_t prefix_len, total;
+  char *text;
+
+  if (!state->active || state->pid > 0 || state->fd >= 0)
+    return 0;
+
+  /* The command owns its process group for the duration of one sample. */
+  kill_block_group(state, SIGKILL);
+
+  success = !state->timed_out && !state->too_long && !state->embedded_nul &&
+            !state->read_error &&
+            WIFEXITED(state->wait_status) &&
+            WEXITSTATUS(state->wait_status) == 0;
+
+  while (state->output_len && state->output[state->output_len - 1] == '\r')
+    --state->output_len;
+
+  if (success && !rawmstat_utf8_valid(state->output, state->output_len)) {
+    fprintf(stderr, "rawmstat: block '%s' produced invalid UTF-8\n",
+            block->name);
+    success = false;
+  }
+
+  if (success && state->output_len == 0) {
+    changed = set_block_text(state, "");
+  } else if (success) {
+    prefix_len = strlen(block->prefix);
+    total = prefix_len + state->output_len;
+    if (total > RAWMSTAT_RAWM_V1_MAX) {
+      fprintf(stderr,
+              "rawmstat: block '%s' text exceeds rawm-v1 limit\n",
+              block->name);
+      success = false;
+    } else {
+      text = xmalloc(total + 1);
+      memcpy(text, block->prefix, prefix_len);
+      memcpy(text + prefix_len, state->output, state->output_len);
+      text[total] = '\0';
+      if (state->text && !strcmp(state->text, text)) {
+        free(text);
+      } else {
+        free(state->text);
+        state->text = text;
+        changed = 1;
+      }
+    }
+  }
+
+  if (!success && !state->timed_out) {
+    if (state->read_error) {
+      fprintf(stderr,
+              "rawmstat: block '%s' output could not be read; keeping previous value\n",
+              block->name);
+    } else if (state->too_long || state->embedded_nul) {
+      fprintf(stderr,
+              "rawmstat: block '%s' produced invalid rawm-v1 text%s\n",
+              block->name, state->too_long ? " (too long)" : "");
+    } else if (WIFEXITED(state->wait_status)) {
+      fprintf(stderr,
+              "rawmstat: block '%s' exited with status %d; keeping previous value\n",
+              block->name, WEXITSTATUS(state->wait_status));
+    } else if (WIFSIGNALED(state->wait_status)) {
+      fprintf(stderr,
+              "rawmstat: block '%s' was terminated by signal %d; keeping previous value\n",
+              block->name, WTERMSIG(state->wait_status));
+    }
+  }
+
+  free(state->output);
+  state->output = NULL;
+  state->output_len = 0;
+  state->active = false;
+  state->timed_out = false;
+  state->pid = 0;
+  state->pgid = 0;
+  state->fd = -1;
+  state->deadline = 0;
+  state->line_done = false;
+  state->too_long = false;
+  state->embedded_nul = false;
+  state->read_error = false;
+  return changed;
+}
+
+static int
+finish_ready_blocks(const RawmstatConfig *cfg, BlockState *states, uint64_t now)
+{
+  size_t i;
+  int changed = 0;
+
+  for (i = 0; i < cfg->block_count; ++i) {
+    if (!states[i].active || states[i].pid > 0 || states[i].fd >= 0)
+      continue;
+    if (finish_block(&cfg->blocks[i], &states[i]) > 0)
+      changed = 1;
+    if (states[i].pending)
+      (void)start_block(&cfg->blocks[i], &states[i], now);
+  }
+  return changed;
+}
+
+static char *
+build_status(const RawmstatConfig *cfg, const BlockState *states)
 {
   size_t i, len = 0;
   bool first = true;
   size_t delimiter_len = strlen(cfg->delimiter);
+  char *status;
 
   if (!rawmstat_utf8_valid((const unsigned char *)cfg->delimiter,
                            delimiter_len)) {
     fputs("rawmstat: status delimiter is not valid UTF-8\n", stderr);
-    return -1;
+    return NULL;
   }
 
   for (i = 0; i < cfg->block_count; ++i) {
@@ -304,11 +495,25 @@ build_status(const RawmstatConfig *cfg, const BlockState *states, char *status,
     if (!text_len)
       continue;
     extra = text_len + (first ? 0 : delimiter_len);
-    if (extra > RAWMSTAT_STATUS_MAX - len || len + extra + 1 > size) {
-      fputs("rawmstat: composed status exceeds rawm-v1 255-byte limit\n",
-            stderr);
-      return -1;
+    if (extra > RAWMSTAT_RAWM_V1_MAX - len) {
+      fprintf(stderr,
+              "rawmstat: composed status exceeds rawm-v1 %u-byte limit\n",
+              RAWMSTAT_RAWM_V1_MAX);
+      return NULL;
     }
+    len += extra;
+    first = false;
+  }
+
+  status = xmalloc(len + 1);
+  len = 0;
+  first = true;
+  for (i = 0; i < cfg->block_count; ++i) {
+    const char *text = states[i].text ? states[i].text : "";
+    size_t text_len = strlen(text);
+
+    if (!text_len)
+      continue;
     if (!first) {
       memcpy(status + len, cfg->delimiter, delimiter_len);
       len += delimiter_len;
@@ -318,7 +523,7 @@ build_status(const RawmstatConfig *cfg, const BlockState *states, char *status,
     first = false;
   }
   status[len] = '\0';
-  return 0;
+  return status;
 }
 
 #ifndef NO_X
@@ -371,27 +576,6 @@ publish_status(const char *status, bool stdout_mode, char **last)
 #endif
 }
 
-static int
-poll_timeout(const RawmstatConfig *cfg, const BlockState *states, uint64_t now)
-{
-  size_t i;
-  uint64_t earliest = UINT64_MAX;
-
-  for (i = 0; i < cfg->block_count; ++i) {
-    if (!cfg->blocks[i].interval)
-      continue;
-    if (states[i].next_update <= now)
-      return 0;
-    if (states[i].next_update < earliest)
-      earliest = states[i].next_update;
-  }
-  if (earliest == UINT64_MAX)
-    return -1;
-  if (earliest - now > (uint64_t)INT32_MAX)
-    return INT32_MAX;
-  return (int)(earliest - now);
-}
-
 static void
 advance_timer(const RawmstatBlock *block, BlockState *state, uint64_t now)
 {
@@ -410,58 +594,208 @@ advance_timer(const RawmstatBlock *block, BlockState *state, uint64_t now)
 }
 
 static int
-status_loop(const RawmstatConfig *cfg, bool stdout_mode)
+poll_timeout(const RawmstatConfig *cfg, const BlockState *states, uint64_t now)
+{
+  size_t i;
+  uint64_t earliest = UINT64_MAX;
+
+  for (i = 0; i < cfg->block_count; ++i) {
+    if (cfg->blocks[i].interval && states[i].next_update < earliest)
+      earliest = states[i].next_update;
+    if (states[i].active && !states[i].timed_out &&
+        states[i].deadline < earliest)
+      earliest = states[i].deadline;
+  }
+  if (earliest == UINT64_MAX)
+    return -1;
+  if (earliest <= now)
+    return 0;
+  if (earliest - now > (uint64_t)INT_MAX)
+    return INT_MAX;
+  return (int)(earliest - now);
+}
+
+static size_t
+build_pollfds(const RawmstatConfig *cfg, const BlockState *states,
+              struct pollfd *pfds, size_t *map)
+{
+  size_t i, count = 1;
+
+  pfds[0].fd = signal_pipe[0];
+  pfds[0].events = POLLIN;
+  pfds[0].revents = 0;
+  map[0] = SIZE_MAX;
+
+  for (i = 0; i < cfg->block_count; ++i) {
+    if (!states[i].active || states[i].fd < 0)
+      continue;
+    pfds[count].fd = states[i].fd;
+    pfds[count].events = POLLIN | POLLHUP | POLLERR;
+    pfds[count].revents = 0;
+    map[count] = i;
+    ++count;
+  }
+  return count;
+}
+
+static void
+process_timeouts(const RawmstatConfig *cfg, BlockState *states, uint64_t now)
+{
+  size_t i;
+
+  for (i = 0; i < cfg->block_count; ++i) {
+    if (!states[i].active || states[i].timed_out ||
+        states[i].deadline > now)
+      continue;
+    fprintf(stderr, "rawmstat: block '%s' timed out after %u ms\n",
+            cfg->blocks[i].name, cfg->blocks[i].timeout_ms);
+    states[i].timed_out = true;
+    kill_block_group(&states[i], SIGKILL);
+  }
+}
+
+static void
+request_due_blocks(const RawmstatConfig *cfg, BlockState *states, uint64_t now)
+{
+  size_t i;
+
+  for (i = 0; i < cfg->block_count; ++i) {
+    if (!cfg->blocks[i].interval || states[i].next_update > now)
+      continue;
+    if (states[i].active)
+      states[i].pending = true;
+    else
+      (void)start_block(&cfg->blocks[i], &states[i], now);
+    advance_timer(&cfg->blocks[i], &states[i], now);
+  }
+}
+
+static void
+request_signaled_blocks(const RawmstatConfig *cfg, BlockState *states,
+                        const unsigned char signals[256], uint64_t now)
+{
+  size_t i;
+
+  for (i = 0; i < cfg->block_count; ++i) {
+    int signum = rawmstat_block_signal_number(&cfg->blocks[i]);
+
+    if (signum <= 0 || !signals[(unsigned char)signum])
+      continue;
+    if (states[i].active)
+      states[i].pending = true;
+    else
+      (void)start_block(&cfg->blocks[i], &states[i], now);
+  }
+}
+
+static void
+terminate_children(BlockState *states, size_t count)
+{
+  uint64_t deadline;
+  size_t i;
+  struct timespec pause = { 0, 20000000L };
+  bool any;
+
+  for (i = 0; i < count; ++i)
+    if (states[i].active)
+      kill_block_group(&states[i], SIGTERM);
+
+  deadline = monotonic_msec() + RAWMSTAT_SHUTDOWN_GRACE_MS;
+  do {
+    reap_children(states, count);
+    any = false;
+    for (i = 0; i < count; ++i)
+      if (states[i].active && states[i].pid > 0)
+        any = true;
+    if (!any || monotonic_msec() >= deadline)
+      break;
+    nanosleep(&pause, NULL);
+  } while (true);
+
+  for (i = 0; i < count; ++i)
+    if (states[i].active)
+      kill_block_group(&states[i], SIGKILL);
+
+  for (i = 0; i < count; ++i) {
+    int status;
+
+    if (states[i].pid > 0) {
+      while (waitpid(states[i].pid, &status, 0) < 0 && errno == EINTR)
+        ;
+      states[i].pid = 0;
+    }
+    if (states[i].fd >= 0) {
+      close(states[i].fd);
+      states[i].fd = -1;
+    }
+    free(states[i].output);
+    states[i].output = NULL;
+    states[i].active = false;
+    states[i].pgid = 0;
+  }
+}
+
+static int
+status_loop(const RawmstatConfig *cfg, bool stdout_mode, bool *restart)
 {
   BlockState *states;
-  struct pollfd pfd;
-  char status[RAWMSTAT_STATUS_MAX + 1];
+  struct pollfd *pfds;
+  size_t *map;
   char *last = NULL;
   size_t i;
   bool running = true;
-  bool dirty = true;
+  bool dirty = false;
   bool failed = false;
   uint64_t now;
 
-  states = calloc(cfg->block_count ? cfg->block_count : 1, sizeof(*states));
-  if (!states) {
-    fputs("rawmstat: out of memory\n", stderr);
-    return -1;
+  states = xcalloc(cfg->block_count, sizeof(*states));
+  pfds = xcalloc(cfg->block_count + 1, sizeof(*pfds));
+  map = xcalloc(cfg->block_count + 1, sizeof(*map));
+  for (i = 0; i < cfg->block_count; ++i)
+    states[i].fd = -1;
+
+#ifndef NO_X
+  if (!stdout_mode && publish_status("", false, &last) < 0) {
+    failed = true;
+    goto out;
   }
+#endif
 
   now = monotonic_msec();
   for (i = 0; i < cfg->block_count; ++i) {
-    (void)run_block(&cfg->blocks[i], &states[i]);
+    (void)start_block(&cfg->blocks[i], &states[i], now);
     advance_timer(&cfg->blocks[i], &states[i], now);
   }
 
-  pfd.fd = signal_pipe[0];
-  pfd.events = POLLIN;
-
   while (running) {
-    int timeout;
-    int rc;
+    size_t poll_count;
+    int timeout, rc;
 
     if (dirty) {
-      if (build_status(cfg, states, status, sizeof(status)) == 0 &&
-          publish_status(status, stdout_mode, &last) < 0) {
-        failed = true;
-        running = false;
-        break;
+      char *status = build_status(cfg, states);
+
+      if (status) {
+        if (publish_status(status, stdout_mode, &last) < 0) {
+          free(status);
+          failed = true;
+          break;
+        }
+        free(status);
       }
       dirty = false;
     }
 
     now = monotonic_msec();
+    poll_count = build_pollfds(cfg, states, pfds, map);
     timeout = poll_timeout(cfg, states, now);
-    rc = poll(&pfd, 1, timeout);
+    rc = poll(pfds, (nfds_t)poll_count, timeout);
     if (rc < 0 && errno != EINTR) {
       perror("rawmstat: poll");
       failed = true;
-      running = false;
       break;
     }
 
-    if (rc > 0 && (pfd.revents & POLLIN)) {
+    if (rc > 0 && (pfds[0].revents & POLLIN)) {
       unsigned char signals[256] = {0};
       unsigned char bytes[64];
       ssize_t n;
@@ -471,30 +805,45 @@ status_loop(const RawmstatConfig *cfg, bool stdout_mode)
         for (j = 0; j < n; ++j)
           signals[bytes[j]] = 1;
       }
-      if (signals[(unsigned char)SIGINT] || signals[(unsigned char)SIGTERM])
+      if (signals[(unsigned char)SIGINT] ||
+          signals[(unsigned char)SIGTERM]) {
         running = false;
-      for (i = 0; running && i < cfg->block_count; ++i) {
-        int signum = rawmstat_block_signal_number(&cfg->blocks[i]);
-        if (signum > 0 && signals[(unsigned char)signum]) {
-          if (run_block(&cfg->blocks[i], &states[i]) > 0)
-            dirty = true;
-        }
+      } else if (signals[(unsigned char)SIGHUP]) {
+        *restart = true;
+        running = false;
+      } else {
+        now = monotonic_msec();
+        request_signaled_blocks(cfg, states, signals, now);
       }
     }
 
-    now = monotonic_msec();
-    for (i = 0; running && i < cfg->block_count; ++i) {
-      if (cfg->blocks[i].interval && states[i].next_update <= now) {
-        if (run_block(&cfg->blocks[i], &states[i]) > 0)
-          dirty = true;
-        advance_timer(&cfg->blocks[i], &states[i], now);
+    if (rc > 0) {
+      size_t p;
+
+      for (p = 1; p < poll_count; ++p) {
+        if (pfds[p].revents & (POLLIN | POLLHUP | POLLERR))
+          read_block_output(&states[map[p]]);
       }
     }
+
+    reap_children(states, cfg->block_count);
+    now = monotonic_msec();
+    process_timeouts(cfg, states, now);
+    request_due_blocks(cfg, states, now);
+    reap_children(states, cfg->block_count);
+    if (finish_ready_blocks(cfg, states, now) > 0)
+      dirty = true;
   }
 
-  for (i = 0; i < cfg->block_count; ++i)
+out:
+  terminate_children(states, cfg->block_count);
+  for (i = 0; i < cfg->block_count; ++i) {
     free(states[i].text);
+    free(states[i].output);
+  }
   free(states);
+  free(pfds);
+  free(map);
   free(last);
   return failed ? -1 : 0;
 }
@@ -506,6 +855,7 @@ main(int argc, char **argv)
   const char *config_path = NULL;
   bool check_config = false;
   bool stdout_mode = false;
+  bool restart = false;
   int i;
   int rc = EXIT_FAILURE;
 
@@ -550,7 +900,7 @@ main(int argc, char **argv)
 #endif
   if (setup_signals(&config) < 0)
     goto out_x;
-  if (status_loop(&config, stdout_mode) < 0)
+  if (status_loop(&config, stdout_mode, &restart) < 0)
     goto out_signals;
   rc = EXIT_SUCCESS;
 
@@ -558,10 +908,17 @@ out_signals:
   close_signals();
 out_x:
 #ifndef NO_X
-  if (dpy)
+  if (dpy) {
     XCloseDisplay(dpy);
+    dpy = NULL;
+  }
 #endif
 out:
   rawmstat_config_destroy(&config);
+  if (restart && rc == EXIT_SUCCESS) {
+    execvp(argv[0], argv);
+    perror("rawmstat: execvp");
+    return EXIT_FAILURE;
+  }
   return rc;
 }

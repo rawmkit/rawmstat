@@ -172,6 +172,7 @@ rawmstat_config_init(RawmstatConfig *cfg)
     block->argv[i] = xstrdup(argv[i]);
   block->interval = 5;
   block->signal = 0;
+  block->timeout_ms = RAWMSTAT_DEFAULT_TIMEOUT_MS;
 }
 
 void
@@ -260,7 +261,7 @@ static int
 parse_blocks(FILE *err, RawmstatConfig *cfg, const config_setting_t *list)
 {
   static const char *const allowed[] = {
-    "name", "prefix", "command", "interval", "signal"
+    "name", "prefix", "command", "interval", "signal", "timeout_ms"
   };
   RawmstatBlock *blocks;
   int i, j, n;
@@ -276,7 +277,7 @@ parse_blocks(FILE *err, RawmstatConfig *cfg, const config_setting_t *list)
     config_setting_t *setting;
     int argc;
 
-    if (validate_members(err, entry, allowed, 5) < 0)
+    if (validate_members(err, entry, allowed, 6) < 0)
       goto fail;
 
     setting = config_setting_get_member(entry, "name");
@@ -348,6 +349,23 @@ parse_blocks(FILE *err, RawmstatConfig *cfg, const config_setting_t *list)
         goto fail;
       }
       blocks[i].signal = (unsigned int)number;
+    }
+
+    blocks[i].timeout_ms = RAWMSTAT_DEFAULT_TIMEOUT_MS;
+    setting = config_setting_get_member(entry, "timeout_ms");
+    if (setting) {
+      int number;
+      if (config_setting_type(setting) != CONFIG_TYPE_INT) {
+        cfg_error(err, setting, "block timeout_ms must be an integer%s", "");
+        goto fail;
+      }
+      number = config_setting_get_int(setting);
+      if (number < 1 || number > 600000) {
+        cfg_error(err, setting, "block timeout_ms must be in range %s",
+                  "1..600000");
+        goto fail;
+      }
+      blocks[i].timeout_ms = (unsigned int)number;
     }
   }
 
@@ -485,7 +503,7 @@ rawmstat_config_validate(const RawmstatConfig *cfg, FILE *err)
     fputs("rawmstat: configuration error: status.delimiter is missing\n", err);
     return -1;
   }
-  if (strlen(cfg->delimiter) > RAWMSTAT_STATUS_MAX ||
+  if (strlen(cfg->delimiter) > RAWMSTAT_RAWM_V1_MAX ||
       !rawmstat_utf8_valid((const unsigned char *)cfg->delimiter,
                            strlen(cfg->delimiter))) {
     fputs("rawmstat: configuration error: status.delimiter must be valid UTF-8 within the rawm-v1 limit\n", err);
@@ -498,7 +516,7 @@ rawmstat_config_validate(const RawmstatConfig *cfg, FILE *err)
       fputs("rawmstat: configuration error: block name must not be empty\n", err);
       return -1;
     }
-    if (!block->prefix || strlen(block->prefix) > RAWMSTAT_STATUS_MAX ||
+    if (!block->prefix || strlen(block->prefix) > RAWMSTAT_RAWM_V1_MAX ||
         !rawmstat_utf8_valid((const unsigned char *)block->prefix,
                              strlen(block->prefix))) {
       fprintf(err, "rawmstat: configuration error: block '%s' prefix must be valid UTF-8 within the rawm-v1 limit\n",
@@ -507,6 +525,12 @@ rawmstat_config_validate(const RawmstatConfig *cfg, FILE *err)
     }
     if (!block->argv || block->argc == 0 || !block->argv[0] || !*block->argv[0]) {
       fprintf(err, "rawmstat: configuration error: block '%s' has no executable\n",
+              block->name);
+      return -1;
+    }
+    if (block->timeout_ms < 1 || block->timeout_ms > 600000) {
+      fprintf(err,
+              "rawmstat: configuration error: block '%s' timeout_ms must be in range 1..600000\n",
               block->name);
       return -1;
     }

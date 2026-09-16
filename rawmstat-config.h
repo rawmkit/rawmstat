@@ -4,7 +4,8 @@
 #include <stddef.h>
 #include <stdio.h>
 
-#define RAWMSTAT_STATUS_MAX 255
+#define RAWMSTAT_RAWM_V1_MAX 255u
+#define RAWMSTAT_DEFAULT_TIMEOUT_MS 2000u
 
 typedef enum {
   RAWMSTAT_PROTOCOL_RAWM_V1
@@ -17,6 +18,7 @@ typedef struct {
   size_t argc;
   unsigned int interval;
   unsigned int signal;
+  unsigned int timeout_ms;
 } RawmstatBlock;
 
 typedef struct {
