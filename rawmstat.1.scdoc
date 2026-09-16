@@ -17,10 +17,12 @@ rawmstat - configurable status producer for rawm
 *rawmstat* executes configured status blocks, composes their textual output,
 and publishes the result for *rawm*(1).
 
-With the *rawm-v1* protocol, the composed status is written as plain UTF-8 to
-the *\_RAWM\_STATUS\_V1* property of the X root window.  The property type is
-*UTF8_STRING*.  No process discovery, socket, root *WM_NAME* convention, or
-in-band presentation markup is involved.
+With the *rawm-v2* protocol, rawmstat publishes ordered semantic segments to
+the *\_RAWM\_STATUS\_V2* property of the X root window. Each segment has a
+stable identifier, text, and one of the states *normal*, *warning*, or
+*critical*. The property type is *UTF8_STRING*. No process discovery, socket,
+root *WM_NAME* convention, color value, or in-band presentation markup is
+involved.
 
 Configuration is read at run time.  See *rawmstat.conf*(5) for configuration
 precedence, block semantics, update intervals, and realtime update signals.
@@ -39,7 +41,7 @@ supervise *rawm*(1); normally both processes are started by the X session.
 	the X display or executing any blocks.
 
 *-p*, *--stdout*
-	Write each changed composed status line to standard output instead of the
+	Write each changed rawm-v2 wire payload to standard output instead of the
 	X root property.  This is useful for testing and for text-oriented status
 	consumers.  The process continues running and updates according to the same
 	interval and signal rules as X mode.
@@ -77,9 +79,12 @@ example:
 command = ("/bin/sh", "-c", "printf '%s' \"$HOME\"");
 ```
 
-Only the first output line from a block is used.  A trailing carriage return
-is removed.  Block text, prefixes, delimiters, and the final status must be
-valid UTF-8 and the final *rawm-v1* payload must fit within 4096 bytes.
+Only the first output line from a block is used. A trailing carriage return is
+removed. Plain output becomes a *normal* segment. A line beginning with exactly
+*normal<TAB>*, *warning<TAB>*, or *critical<TAB>* selects that semantic state
+and removes the state prefix before the configured block prefix is prepended.
+Committed segment text must be printable UTF-8 without ASCII control
+characters, and the complete *rawm-v2* payload must fit within 4096 bytes.
 
 # SIGNALS
 

@@ -6,8 +6,9 @@ rawmstat.conf - rawmstat runtime configuration
 
 # DESCRIPTION
 
-*rawmstat*(1) uses libconfig syntax.  Configuration describes the status
-protocol, textual composition policy, and the blocks that produce status text.
+*rawmstat*(1) uses libconfig syntax.  Configuration describes the status protocol and the blocks that produce semantic
+status segments. Presentation policy such as separators and colors belongs to
+*rawm*(1).
 
 The built-in configuration contains one clock block and is usable without a
 configuration file.  In normal mode configuration is layered in this order:
@@ -34,40 +35,42 @@ resolved relative to the directory of the configuration file being loaded.
 
 # STATUS
 
-The top-level *status* group controls composition and transport.
+The top-level *status* group selects the output protocol.
 
-*protocol* = "rawm-v1"
-	Output protocol.  *"rawm-v1"* is currently the only supported value and
-	the built-in default.
-
-*delimiter* = string
-	Text inserted between non-empty block results.  The built-in default is
-	*" | "*.  The delimiter must be valid UTF-8.  It is not appended before
-	the first or after the last emitted block.
+*protocol* = "rawm-v2"
+	Output protocol. *"rawm-v2"* is the only supported value and the built-in
+	default.
 
 Example:
 
 ```
 status = {
-  protocol = "rawm-v1";
-  delimiter = " | ";
+  protocol = "rawm-v2";
 };
 ```
 
-## rawm-v1
+## rawm-v2
 
-The final status is a plain UTF-8 string of at most 4096 bytes.  In normal X
-mode rawmstat writes it to the *\_RAWM\_STATUS\_V1* property of the X root window
-with type *UTF8_STRING* and format 8.
+rawmstat publishes the *\_RAWM\_STATUS\_V2* property of the X root window
+with type *UTF8_STRING* and format 8. The complete property may contain at most
+4096 bytes. It consists of ordered records:
 
-The protocol contains text only.  It defines no colors, markup, block IDs,
-click routing, producer discovery, or process supervision.  Presentation is
-owned by *rawm*(1).  The root *WM_NAME* property is not used.
+```
+id<TAB>state<TAB>text<LF>
+```
+
+The block *name* becomes _id_. _state_ is *normal*, *warning*, or *critical*.
+_text_ is the committed block text after optional semantic-state parsing and
+configured prefix application. Empty blocks are omitted. Every emitted record,
+including the last, ends in newline.
+
+rawmstat does not choose colors or separators. *rawm*(1) maps semantic state to
+its own palette and inserts its configured separator when rendering.
 
 # BLOCKS
 
-The top-level *blocks* setting is a list of groups.  Blocks are evaluated in
-list order and non-empty results are joined with *status.delimiter*.
+The top-level *blocks* setting is a list of groups. Blocks retain list order in
+the rawm-v2 payload. Empty block results are omitted.
 
 ```
 blocks = (
@@ -85,13 +88,14 @@ blocks = (
 Each block accepts these settings:
 
 *name* = string
-	Required unique block name.  The name identifies the block in diagnostics;
-	it is not transmitted by *rawm-v1*.  Empty and duplicate names are errors.
+	Required unique segment identifier. It is transmitted as the rawm-v2 _id_
+	field and must contain 1..64 characters from *A-Z*, *a-z*, *0-9*, period,
+	underscore, or hyphen. Duplicate names are errors.
 
 *prefix* = string
-	Optional UTF-8 text prepended to the block's captured first line.  Default
-	is the empty string.  Prefix plus captured text must fit within the protocol
-	limit.
+	Optional printable UTF-8 prepended to the committed segment text after any
+	semantic state prefix is consumed. Default is the empty string. ASCII control
+	characters are not permitted.
 
 *command* = (string, ...)
 	Required non-empty argument vector.  Element zero names the executable;
@@ -119,30 +123,42 @@ Each block accepts these settings:
 # COMMAND OUTPUT
 
 rawmstat starts blocks asynchronously and captures their standard output
-without blocking unrelated blocks, timers, update signals, or shutdown.  Only
-one invocation of a block may run at a time.  If another timer or update signal
+without blocking unrelated blocks, timers, update signals, or shutdown. Only
+one invocation of a block may run at a time. If another timer or update signal
 arrives while that block is running, rawmstat records one pending refresh; any
 additional requests coalesce into that same pending refresh.
 
-Only the first output line is used; subsequent output is discarded.  A
-trailing carriage return is removed from the captured line.  The captured line
-must be valid UTF-8, contain no embedded NUL byte, and fit within 4096 bytes
-before composition.  The configured prefix is prepended after capture.
+Only the first output line is used; subsequent output is discarded. A trailing
+carriage return is removed. Successful plain output is a *normal* sample. A
+block may select semantic state by beginning its first line with exactly one of:
+
+```
+normal<TAB>text
+warning<TAB>text
+critical<TAB>text
+```
+
+When one of those prefixes is recognized, it is removed before *prefix* is
+prepended. The resulting text must be non-empty printable UTF-8 and may not
+contain ASCII control characters. A successful empty first line, or a semantic
+state prefix followed by empty text, clears the block.
+
+A tab that is not part of a recognized leading state prefix makes the sample
+invalid. This keeps the rawm-v2 wire grammar unambiguous without introducing an
+escaping language.
 
 A sample is committed only when the command exits normally with status 0 and
-its captured text satisfies the protocol constraints.  An empty successful
-first line clears the block, causing it to be omitted from delimiter
-composition.  A non-zero exit, signal termination, invalid output, read error,
-or timeout leaves the previous successful value unchanged.
+its captured text satisfies the protocol constraints. A non-zero exit, signal
+termination, invalid output, read error, or timeout leaves both the previous
+text and previous semantic state unchanged.
 
-Each invocation runs in a rawmstat-owned process group.  When the invocation
+Each invocation runs in a rawmstat-owned process group. When the invocation
 finishes, times out, or rawmstat shuts down, descendants in that group are not
-allowed to escape as background jobs.  Standard error is not captured and
+allowed to escape as background jobs. Standard error is not captured and
 remains attached to rawmstat's standard error.
 
-The complete composed status, including prefixes and delimiters, must not
-exceed 4096 bytes.  If it does, rawmstat reports an error rather than publishing
-a truncated protocol message.
+The complete sequence of rawm-v2 records must not exceed 4096 bytes. If it
+does, rawmstat reports an error rather than publishing a truncated message.
 
 # EXAMPLES
 
@@ -150,8 +166,7 @@ A clock and load-average status:
 
 ```
 status = {
-  protocol = "rawm-v1";
-  delimiter = "  ";
+  protocol = "rawm-v2";
 };
 
 blocks = (
@@ -168,6 +183,22 @@ blocks = (
   }
 );
 ```
+
+A helper can report severity without knowing rawm's colors:
+
+```
+blocks = (
+  {
+    name = "cpu";
+    command = ("/usr/local/bin/rawmstat-cpu");
+    interval = 2;
+  }
+);
+```
+
+For example, that helper may print *warning<TAB>cpu:63%* or
+*critical<TAB>cpu:94%*. rawmstat transmits the semantic state; rawm decides how
+warning and critical states look.
 
 A command that deliberately requires shell syntax:
 

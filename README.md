@@ -3,7 +3,7 @@ OVERVIEW
 
 `rawmstat` is a small runtime-configurable status producer for `rawm(1)`.
 It executes configured commands, composes their first output lines, and
-publishes plain UTF-8 through rawm's `_RAWM_STATUS_V1` root-window property.
+publishes semantic status segments through rawm's `_RAWM_STATUS_V2` root-window property.
 It can instead print changed status lines to stdout for testing or use with
 text-oriented consumers.
 
@@ -18,7 +18,7 @@ substantially: configuration is loaded at runtime with libconfig, block
 commands are direct argv vectors, scheduling and command output are handled
 asynchronously in a monotonic `poll(2)` event loop, realtime and lifecycle
 signals are handled through a self-pipe, command invocations are bounded by
-per-block timeouts, and status transport uses the `rawm-v1` protocol rather
+per-block timeouts, and status transport uses the `rawm-v2` protocol rather
 than the root `WM_NAME` convention.
 
 See git log for the complete history.
@@ -67,8 +67,7 @@ Example:
 
 ```
 status = {
-  protocol = "rawm-v1";
-  delimiter = " | ";
+  protocol = "rawm-v2";
 };
 
 blocks = (
@@ -100,8 +99,8 @@ rawmstat &
 exec rawm
 ```
 
-rawmstat writes `_RAWM_STATUS_V1`; rawm watches that property and renders its
-plain UTF-8 value according to rawm's own bar policy.
+rawmstat writes `_RAWM_STATUS_V2`; rawm watches that property and renders the
+ordered semantic segments according to rawm's own separator and color policy.
 
 
 LICENSE
