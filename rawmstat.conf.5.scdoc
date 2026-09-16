@@ -56,7 +56,7 @@ status = {
 
 ## rawm-v1
 
-The final status is a plain UTF-8 string of at most 255 bytes.  In normal X
+The final status is a plain UTF-8 string of at most 4096 bytes.  In normal X
 mode rawmstat writes it to the *\_RAWM\_STATUS\_V1* property of the X root window
 with type *UTF8_STRING* and format 8.
 
@@ -77,6 +77,7 @@ blocks = (
     command = ("date", "+%a %b %d %H:%M");
     interval = 5;
     signal = 0;
+    timeout_ms = 2000;
   }
 );
 ```
@@ -109,22 +110,38 @@ Each block accepts these settings:
 	Multiple blocks may intentionally use the same non-zero offset and will all
 	be refreshed by that signal.
 
+*timeout_ms* = integer
+	Maximum lifetime of one command invocation in milliseconds.  The value must
+	be in the range 1..600000.  The built-in default is 2000.  A timed-out
+	command and every process that it created in the same process group are
+	terminated; the block retains its last successful value.
+
 # COMMAND OUTPUT
 
-rawmstat captures standard output from each block.  Only the first line is
-used; subsequent output is discarded.  A trailing carriage return is removed
-from the captured line.
+rawmstat starts blocks asynchronously and captures their standard output
+without blocking unrelated blocks, timers, update signals, or shutdown.  Only
+one invocation of a block may run at a time.  If another timer or update signal
+arrives while that block is running, rawmstat records one pending refresh; any
+additional requests coalesce into that same pending refresh.
 
-The captured line must be valid UTF-8, contain no embedded NUL byte, and fit
-within 255 bytes before composition.  The configured prefix is prepended after
-capture.  Blocks with an empty resulting string are omitted from delimiter
-composition.
+Only the first output line is used; subsequent output is discarded.  A
+trailing carriage return is removed from the captured line.  The captured line
+must be valid UTF-8, contain no embedded NUL byte, and fit within 4096 bytes
+before composition.  The configured prefix is prepended after capture.
 
-Standard error from a block is not captured and remains attached to
-rawmstat's standard error.  Command execution errors are reported by rawmstat.
+A sample is committed only when the command exits normally with status 0 and
+its captured text satisfies the protocol constraints.  An empty successful
+first line clears the block, causing it to be omitted from delimiter
+composition.  A non-zero exit, signal termination, invalid output, read error,
+or timeout leaves the previous successful value unchanged.
+
+Each invocation runs in a rawmstat-owned process group.  When the invocation
+finishes, times out, or rawmstat shuts down, descendants in that group are not
+allowed to escape as background jobs.  Standard error is not captured and
+remains attached to rawmstat's standard error.
 
 The complete composed status, including prefixes and delimiters, must not
-exceed 255 bytes.  If it does, rawmstat reports an error rather than publishing
+exceed 4096 bytes.  If it does, rawmstat reports an error rather than publishing
 a truncated protocol message.
 
 # EXAMPLES

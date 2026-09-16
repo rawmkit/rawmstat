@@ -15,9 +15,11 @@ producers, with an explicit rawm-owned property and payload contract.
 This distribution is a fork of torrinfail's `dwmblocks` as of commit
 a933ce0 (Thu Jan 6 2022).  The current implementation has diverged
 substantially: configuration is loaded at runtime with libconfig, block
-commands are direct argv vectors, scheduling uses a monotonic event loop,
-realtime signals are handled through a self-pipe, and status transport uses
-the `rawm-v1` protocol rather than the root `WM_NAME` convention.
+commands are direct argv vectors, scheduling and command output are handled
+asynchronously in a monotonic `poll(2)` event loop, realtime and lifecycle
+signals are handled through a self-pipe, command invocations are bounded by
+per-block timeouts, and status transport uses the `rawm-v1` protocol rather
+than the root `WM_NAME` convention.
 
 See git log for the complete history.
 
@@ -75,13 +77,17 @@ blocks = (
     command = ("date", "+%a %b %d %H:%M");
     interval = 5;
     signal = 0;
+    timeout_ms = 2000;
   }
 );
 ```
 
 Commands are argv vectors and are executed directly; there is no implicit
-shell.  See `rawmstat.conf(5)` for the complete schema, composition rules,
-and signal semantics.
+shell.  Blocks run asynchronously, at most one invocation per block is active,
+and `timeout_ms` bounds every sample.  Failed or timed-out samples retain the
+last successful value.  `SIGHUP` re-executes rawmstat with its original argv to
+reload configuration.  See `rawmstat.conf(5)` for the complete schema,
+composition rules, and lifecycle semantics.
 
 
 SESSION

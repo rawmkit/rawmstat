@@ -52,11 +52,22 @@ supervise *rawm*(1); normally both processes are started by the X session.
 
 # RUNTIME MODEL
 
-At startup every configured block is executed once.  A block with a non-zero
-*interval* is subsequently executed on its monotonic interval.  A block with a
-non-zero *signal* may also be refreshed by sending the corresponding realtime
-signal to the rawmstat process.  Signal handlers only wake the main event loop;
-commands and Xlib operations are not executed from signal context.
+At startup every configured block is launched once.  Blocks execute
+asynchronously, so a slow or hung command does not stop unrelated blocks,
+realtime refreshes, X publication, or process shutdown.  A block with a
+non-zero *interval* is subsequently requested on its monotonic interval.  A
+block with a non-zero *signal* may also be refreshed by sending the
+corresponding realtime signal to the rawmstat process.
+
+Only one invocation of a given block runs at a time.  Refresh requests received
+while it is running coalesce into one pending rerun.  Every invocation has a
+configured timeout and owns its child process group.  Only successful exit
+status 0 commits a new sample; failures and timeouts retain the previous
+successful value.
+
+Signal handlers only wake the main event loop.  Command execution, child
+reaping, configuration lifecycle, and Xlib operations are not performed from
+signal context.
 
 Block commands are direct argument vectors executed with *execvp*(3).  Shell
 syntax is not interpreted unless a shell is explicitly configured, for
@@ -68,12 +79,19 @@ command = ("/bin/sh", "-c", "printf '%s' \"$HOME\"");
 
 Only the first output line from a block is used.  A trailing carriage return
 is removed.  Block text, prefixes, delimiters, and the final status must be
-valid UTF-8 and the final *rawm-v1* payload must fit within 255 bytes.
+valid UTF-8 and the final *rawm-v1* payload must fit within 4096 bytes.
 
 # SIGNALS
 
 *SIGINT*, *SIGTERM*
-	Terminate the main loop cleanly.
+	Terminate the main loop cleanly.  Running block process groups are first
+	asked to terminate and are forcibly killed after a short bounded grace
+	period if necessary.
+
+*SIGHUP*
+	Terminate running block process groups, then re-execute rawmstat with its
+	original argument vector.  This reloads the selected configuration while
+	retaining the rawmstat process ID.
 
 *SIGRTMIN+N*
 	Refresh each block whose *signal* setting is _N_.  A signal value of zero
